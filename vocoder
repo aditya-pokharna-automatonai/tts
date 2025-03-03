@@ -1,0 +1,99 @@
+// this is vocoder using glow for converting mel spectom to wave form or audio file 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
+import soundfile as sf
+
+class Invertible1x1Conv(nn.Module):
+    """Invertible 1x1 Convolution for Glow"""
+    def __init__(self, channels):
+        super().__init__()
+        W, _ = torch.linalg.qr(torch.randn(channels, channels), mode='reduced')
+        self.W = nn.Parameter(W)
+
+    def forward(self, x):
+        B, C, T = x.shape
+        W = self.W.unsqueeze(0).expand(B, -1, -1)
+        return torch.matmul(W, x)
+
+    def reverse(self, x):
+        B, C, T = x.shape
+        W_inv = torch.inverse(self.W).unsqueeze(0).expand(B, -1, -1)
+        return torch.matmul(W_inv, x)
+
+class CouplingLayer(nn.Module):
+    """Affine Coupling Layer"""
+    def __init__(self, channels):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(channels // 2, channels // 2, kernel_size=3, padding=1),  # Fix output channels
+            nn.ReLU(),
+            nn.Conv1d(channels // 2, channels, kernel_size=3, padding=1)  # Output should be `channels`
+        )
+
+    def forward(self, x):
+        x_a, x_b = x.chunk(2, dim=1)  # Split into two equal parts
+        out = self.net(x_a)  # Output should be (batch, channels, time)
+        log_s, t = out.chunk(2, dim=1)  # Ensure proper split
+        s = torch.sigmoid(log_s + 2)
+        x_b = x_b * s + t
+        return torch.cat([x_a, x_b], dim=1)
+
+    def reverse(self, x):
+        x_a, x_b = x.chunk(2, dim=1)
+        out = self.net(x_a)
+        log_s, t = out.chunk(2, dim=1)
+        s = torch.sigmoid(log_s + 2)
+        x_b = (x_b - t) / s  # Ensure correct shape
+        return torch.cat([x_a, x_b], dim=1)
+
+
+class GlowVocoder(nn.Module):
+    """Glow-Based Vocoder"""
+    def __init__(self, channels=256, num_flows=6):
+        super().__init__()
+        self.flows = nn.ModuleList()
+        for _ in range(num_flows):
+            self.flows.append(Invertible1x1Conv(channels))
+            self.flows.append(CouplingLayer(channels))
+
+    def forward(self, x):
+        for flow in self.flows:
+            x = flow(x)
+        return x
+
+    def reverse(self, x):
+        for flow in reversed(self.flows):
+            x = flow.reverse(x)
+        return x
+
+def visualize_waveform(waveform):
+    """
+    Visualizes the waveform using Matplotlib.
+    """
+    waveform = waveform.detach().squeeze().cpu().numpy()  # ✅ Detach from computation graph
+    plt.figure(figsize=(10, 4))
+    plt.plot(waveform)
+    plt.title("Generated Waveform")
+    plt.xlabel("Time")
+    plt.ylabel("Amplitude")
+    plt.grid()
+    plt.show()
+
+def save_waveform(waveform, filename="generated.wav", sample_rate=22050):
+    """Save waveform as a .wav file"""
+    waveform = waveform.squeeze().detach().cpu().numpy()
+    sf.write(filename, waveform, sample_rate)
+    print(f"Waveform saved as {filename}")
+
+# Example Usage
+mel_spectrogram = torch.randn(1, 256, 200)  # (batch_size, channels, time)
+vocoder = GlowVocoder()
+waveform = vocoder.reverse(mel_spectrogram)  # Convert mel to waveform
+
+# Visualize and save
+visualize_waveform(waveform)
+save_waveform(waveform)
