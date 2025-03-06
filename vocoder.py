@@ -1,4 +1,4 @@
-// this is vocoder using glow for converting mel spectom to wave form or audio file 
+# // this is vocoder using glow for converting mel spectom to wave form or audio file 
 
 
 # import torch
